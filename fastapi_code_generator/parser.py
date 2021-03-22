@@ -299,8 +299,8 @@ class Operation(CachedPropertyModel):
             model_name = stringcase.pascalcase(self.function_name + "_" + "param")
             self.param_model = Model(name=model_name, fields=fields)
             arguments.append(Argument(
-                name="params",
-                type_hint=model_name,
+                name=UsefulStr("params"),
+                type_hint="param_model." + model_name,
                 required=True,
             ))
 
