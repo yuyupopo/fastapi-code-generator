@@ -1,26 +1,169 @@
 from __future__ import annotations
 
-from fastapi import FastAPI
+from typing import Any, Dict, List, Optional, Type, TypeVar, Union, overload
+
+from pydantic import BaseModel, parse_obj_as
+from typing_extensions import Literal
+
+from crane.vendor.http import AsyncHTTPClient
+
+from . import models as model
 
 {{imports}}
 
-app = FastAPI(
-    {% if info %}
-    {% for key,value in info.items() %}
-    {% set info_value= value.__repr__() %}
-    {{ key }} = {{info_value}},
-    {% endfor %}
-    {% endif %}
-    )
+T = TypeVar("T", bound=BaseModel)
+VERBS = Literal["GET", "POST", "DELETE", "PUT", "HEAD"]
 
+DOCKER_API_VERSION = "1.38"
+DOCKER_TIMEOUT_SEC = 30
+
+@overload
+def to_dict(m: None) -> None:
+    ...
+
+
+@overload
+def to_dict(m: List[T]) -> List[Dict[str, Any]]:
+    ...
+
+
+@overload
+def to_dict(m: T) -> Dict[str, Any]:
+    ...
+
+
+@overload
+def to_dict(m: List[str]) -> List[str]:
+    ...
+
+
+def to_dict(
+    m: Union[List[T], List[str], T, None]
+) -> Union[Dict[str, Any], List[str], List[Dict[str, Any]], None]:
+    if m is None:
+        return None
+    if isinstance(m, str):
+        return m
+    if isinstance(m, list):
+        return [to_dict(item) for item in m]  # type: ignore
+    if isinstance(m, BaseModel):
+        return m.dict(exclude_none=True)
+    return
+
+
+class DockerError(Exception):
+    """Base class for all docker exceptions."""
+
+
+class DockerHTTPError(DockerError):
+    def __init__(self, status_code: int, msg: str) -> None:
+        """Initialize."""
+        self.status_code = status_code
+        self.msg = msg
+
+
+
+class AsyncDockerClient:
+    @classmethod
+    def from_env(cls) -> AsyncDockerClient:
+        """Create a new AsyncDockerClient."""
+        host = "uds:///var/run/docker.sock"
+        endpoint = f"{host}/v{DOCKER_API_VERSION}"
+
+        # default timeout is 5 seconds
+        client = AsyncHTTPClient(endpoint=endpoint, timeout=DOCKER_TIMEOUT_SEC)
+        return cls(client)
+
+    def __init__(self, client: AsyncHTTPClient) -> None:
+        """Initialize."""
+        self.client = client
+
+    @overload
+    async def request(
+        self,
+        verb: VERBS,
+        model_t: None,
+        path: str,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        ...
+
+    @overload
+    async def request(
+        self,
+        verb: VERBS,
+        model_t: Type[str],
+        path: str,
+        *args: Any,
+        **kwargs: Any,
+    ) -> str:
+        ...
+
+    @overload
+    async def request(
+        self,
+        verb: VERBS,
+        model_t: Type[List[T]],
+        path: str,
+        *args: Any,
+        **kwargs: Any,
+    ) -> List[T]:
+        ...
+
+    @overload
+    async def request(
+        self,
+        verb: VERBS,
+        model_t: Type[T],
+        path: str,
+        *args: Any,
+        **kwargs: Any,
+    ) -> T:
+        ...
+
+    async def request(
+        self,
+        verb: VERBS,
+        model_t: Union[None, Type[str], Type[T], Type[List[T]]],
+        path: str,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Union[None, str, T, List[T]]:
+        """Perform request and return json response."""
+        res = await self.client.request(verb, path, *args, **kwargs)
+        if res.status_code != 200:
+            data = model.ErrorResponse.parse_raw(res.text)
+            raise DockerHTTPError(res.status_code, data.message)
+
+        if model_t is None:
+            return None
+        if issubclass(model_t, str):
+            return res.text
+        return parse_obj_as(model_t, res.json())  # type: ignore
 
 {% for operation in operations %}
-@app.{{operation.type}}('{{operation.snake_case_path}}', response_model={{operation.response}})
-def {{operation.function_name}}({{operation.snake_case_arguments}}) -> {{operation.response}}:
-    {%- if operation.summary %}
-    """
-    {{ operation.summary }}
-    """
-    {%- endif %}
-    pass
+    async def {{operation.function_name}}(self, {{operation.snake_case_arguments}}) -> {{operation.response}}:
+        {%- if operation.summary %}
+        """{{ operation.summary }}."""
+        {%- endif %}
+        return await self.request(
+            "{{operation.type.upper()}}",
+            {{operation.response}}, 
+            {%- if operation.has_path_args %}f{%- endif %}"{{operation.snake_case_path}}",
+            {%- if operation.has_param %}params=params.dict(exclude_none=True),{%- endif %}
+            {%- if operation.has_body %}body=to_dict(body){%- endif %}
+        )
+{% endfor %}
+
+
+{% for model in models %}
+class {{model.name}}(BaseModel):
+    {% for field in model.fields %}
+    {{field.argument}}
+    {%- endfor %}
+
+    class Config:
+        allow_population_by_field_name = True
+        allow_mutation = False
 {% endfor %}

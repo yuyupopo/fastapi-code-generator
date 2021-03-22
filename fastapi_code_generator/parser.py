@@ -7,11 +7,11 @@ from typing import Any, Dict, List, Optional, Pattern, Union
 
 import stringcase
 from datamodel_code_generator import (
-    DataModelField,
     cached_property,
     load_yaml,
     snooper_to_methods,
 )
+from datamodel_code_generator.model.pydantic.base_model import DataModelField
 from datamodel_code_generator.imports import Import, Imports
 from datamodel_code_generator.parser.jsonschema import (
     JsonSchemaObject,
@@ -49,6 +49,15 @@ class CachedPropertyModel(BaseModel):
     class Config:
         arbitrary_types_allowed = True
         keep_untouched = (cached_property,)
+
+
+class Field(BaseModel):
+    name: str
+    argument: str
+
+class Model(BaseModel):
+    name: str
+    fields: List[Field]
 
 
 class Response(BaseModel):
@@ -114,6 +123,8 @@ class Operation(CachedPropertyModel):
     security: Optional[List[Dict[str, List[str]]]] = None
     components: Dict[str, Any] = {}
     openapi_model_parser: OpenAPIModelParser
+    param_model: Optional[Model] = None
+    has_path_args: bool = False
 
     @cached_property
     def root_path(self) -> UsefulStr:
@@ -134,15 +145,22 @@ class Operation(CachedPropertyModel):
                 # TODO: support other content-types
                 if RE_APPLICATION_JSON_PATTERN.match(content_type):
                     data_type = self.get_data_type(schema, 'request')
+                    type_hint = data_type.type_hint
+                    if type_hint not in ["Any", "None", "List[str]", "List[int]"]:
+                        if type_hint.startswith("List["):
+                            type_hint = type_hint.replace("List[", "List[model.")
+                        else:
+                            type_hint = "model." + type_hint
+
                     arguments.append(
                         # TODO: support multiple body
                         Argument(
                             name='body',  # type: ignore
-                            type_hint=data_type.type_hint,
+                            type_hint=type_hint,
                             required=requests.required,
                         )
                     )
-                    self.imports.extend(data_type.imports_)
+                    self.imports.extend(data_type.imports)
                 elif content_type == 'application/x-www-form-urlencoded':
                     arguments.append(
                         # TODO: support form with `Form()`
@@ -157,7 +175,10 @@ class Operation(CachedPropertyModel):
                     )
         if not arguments:
             return None
-        return arguments[0]
+        argument = arguments[0]
+        if not argument.required:
+            argument.type_hint = UsefulStr(f"Optional[{argument.type_hint}]")
+        return argument
 
     @cached_property
     def request_objects(self) -> List[Request]:
@@ -195,11 +216,13 @@ class Operation(CachedPropertyModel):
                 description = detail.get("description")
             contents = {}
             for content_type, obj in content.items():
-                contents[content_type] = (
+                content = (
                     JsonSchemaObject.parse_obj(obj["schema"])
                     if "schema" in obj
                     else None
                 )
+                if content is not None:
+                    contents[content_type] = content
 
             responses.append(
                 Response(
@@ -216,6 +239,14 @@ class Operation(CachedPropertyModel):
             path = re.sub(r'/{|/', '_', self.snake_case_path).replace('}', '')
             name = f"{self.type}{path}"
         return stringcase.snakecase(name)
+
+    @cached_property
+    def has_param(self) -> bool:
+        return self.param_model is not None
+
+    @cached_property
+    def has_body(self) -> bool:
+        return bool(self.request)
 
     @cached_property
     def arguments(self) -> str:
@@ -236,10 +267,42 @@ class Operation(CachedPropertyModel):
 
     def get_argument_list(self, snake_case: bool) -> List[Argument]:
         arguments: List[Argument] = []
+        fields: List[Field] = []
 
         if self.parameters:
             for parameter in self.parameters:
-                arguments.append(self.get_parameter_type(parameter, snake_case))
+                parameter_in = parameter["in"]
+                # print(parameter_in)
+                argument = self.get_parameter_type(parameter, snake_case)
+
+                if argument.name == "body":
+                    print(parameter_in, parameter)
+
+                if parameter_in == "header":
+                    continue
+                
+                if parameter_in == "query":
+                    fields.append(Field(
+                        name=argument.name,
+                        argument=argument.argument,
+                    ))
+                
+                elif parameter_in == "path":
+                    arguments.append(argument)
+                else:
+                    raise NotImplementedError(self)
+
+        if arguments:
+            self.has_path_args = True
+
+        if fields:
+            model_name = stringcase.pascalcase(self.function_name + "_" + "param")
+            self.param_model = Model(name=model_name, fields=fields)
+            arguments.append(Argument(
+                name="params",
+                type_hint=model_name,
+                required=True,
+            ))
 
         if self.request:
             arguments.append(self.request)
@@ -248,13 +311,14 @@ class Operation(CachedPropertyModel):
     def get_data_type(self, schema: JsonSchemaObject, suffix: str = '') -> DataType:
         if schema.ref:
             data_type = self.openapi_model_parser.get_ref_data_type(schema.ref)
-            data_type.imports_.append(
-                Import(
-                    # TODO: Improve import statements
-                    from_=model_module_name_var.get(),
-                    import_=data_type.type,
+            if data_type.type is not None:
+                data_type.imports.append(
+                    Import(
+                        # TODO: Improve import statements
+                        from_=model_module_name_var.get(),
+                        import_=data_type.type,
+                    )
                 )
-            )
             return data_type
         elif schema.is_array:
             # TODO: Improve handling array
@@ -270,9 +334,10 @@ class Operation(CachedPropertyModel):
 
             data_type = self.openapi_model_parser.parse_object(name, schema, path)
 
-            self.imports.append(
-                Import(from_=model_module_name_var.get(), import_=data_type.type,)
-            )
+            if data_type.type is not None:
+                self.imports.append(
+                    Import(from_=model_module_name_var.get(), import_=data_type.type,)
+                )
             return data_type
 
         return self.openapi_model_parser.get_data_type(schema)
@@ -295,13 +360,15 @@ class Operation(CachedPropertyModel):
             required=parameter.get("required") or parameter.get("in") == "path",
         )
         self.imports.extend(field.imports)
-        if orig_name != name:
-            default: Optional[
-                str
-            ] = f"Query({'...' if field.required else repr(schema.default)}, alias='{orig_name}')"
-            self.imports.append(Import(from_='fastapi', import_='Query'))
-        else:
-            default = repr(schema.default) if 'default' in parameter["schema"] else None
+        # if orig_name != name:
+        #     pass
+        #     # default: Optional[
+        #     #     str
+        #     # ] = f"Query({'...' if field.required else repr(schema.default)}, alias='{orig_name}')"
+        #     # self.imports.append(Import(from_='fastapi', import_='Query'))
+        # else:
+        default = repr(schema.default) if 'default' in parameter["schema"] else None
+
         return Argument(
             name=field.name,
             type_hint=field.type_hint,
@@ -320,13 +387,22 @@ class Operation(CachedPropertyModel):
                     if RE_APPLICATION_JSON_PATTERN.match(content_type):
                         data_type = self.get_data_type(schema, 'response')
                         data_types.append(data_type)
-                        self.imports.extend(data_type.imports_)
+                        self.imports.extend(data_type.imports)
 
         if not data_types:
             return "None"
         if len(data_types) > 1:
-            return self.openapi_model_parser.data_type(data_types=data_types).type_hint
-        return data_types[0].type_hint
+            type_str = self.openapi_model_parser.data_type(data_types=data_types).type_hint
+        else:
+            type_str = data_types[0].type_hint
+
+        if "List[" in type_str:
+            type_str = type_str.replace("List[", "List[model.")
+        elif type_str not in ["str", "None", "Any", "int", "float"]:
+            
+            type_str = "model." + type_str
+            
+        return type_str
 
 
 OPERATION_NAMES: List[str] = [
@@ -390,6 +466,7 @@ class Operations(BaseModel):
             if operation:
                 parameters = values.get('parameters')
                 if parameters:
+                    print(parameters)
                     operation.parameters.extend(parameters)
                 if security is not None and operation.security is None:
                     operation.security = security
@@ -455,6 +532,7 @@ class ParsedObject:
         )
         self.imports: Imports = Imports()
         self.info = info
+        self.models: List[Model] = []
         for operation in self.operations:
             # create imports
             operation.arguments
@@ -462,6 +540,9 @@ class ParsedObject:
             operation.request
             operation.response
             self.imports.append(operation.imports)
+
+            if operation.param_model is not None:
+                self.models.append(operation.param_model)
 
 
 @snooper_to_methods(max_variable_length=None)
