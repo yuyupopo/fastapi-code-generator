@@ -1,0 +1,16 @@
+from __future__ import annotations
+
+from typing import List, Optional
+
+from pydantic import BaseModel
+
+{% for model in models %}
+class {{model.name}}(BaseModel):
+    {% for field in model.fields %}
+    {{field.argument}}
+    {%- endfor %}
+
+    class Config:
+        allow_population_by_field_name = True
+        allow_mutation = False
+{% endfor %}

@@ -8,6 +8,7 @@ from typing_extensions import Literal
 from crane.vendor.http import AsyncHTTPClient
 
 from . import models as model
+from . import param_model
 
 {{imports}}
 
@@ -154,16 +155,4 @@ class AsyncDockerClient:
             {%- if operation.has_param %}params=params.dict(exclude_none=True),{%- endif %}
             {%- if operation.has_body %}body=to_dict(body){%- endif %}
         )
-{% endfor %}
-
-
-{% for model in models %}
-class {{model.name}}(BaseModel):
-    {% for field in model.fields %}
-    {{field.argument}}
-    {%- endfor %}
-
-    class Config:
-        allow_population_by_field_name = True
-        allow_mutation = False
 {% endfor %}
