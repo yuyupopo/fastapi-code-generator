@@ -146,6 +146,10 @@ class Operation(CachedPropertyModel):
                 if RE_APPLICATION_JSON_PATTERN.match(content_type):
                     data_type = self.get_data_type(schema, 'request')
                     type_hint = data_type.type_hint
+
+                    if type_hint == "Any":
+                        raise NotImplementedError(self.path)
+
                     if type_hint not in ["Any", "None", "List[str]", "List[int]"]:
                         if type_hint.startswith("List["):
                             type_hint = type_hint.replace("List[", "List[model.")
@@ -190,9 +194,8 @@ class Operation(CachedPropertyModel):
         else:
             request_body = self.requestBody
         for content_type, obj in request_body.get('content', {}).items():
-            contents[content_type] = (
-                JsonSchemaObject.parse_obj(obj['schema']) if 'schema' in obj else None
-            )
+            content = JsonSchemaObject.parse_obj(obj['schema']) if 'schema' in obj else None
+            contents[content_type] = content     
             requests.append(
                 Request(
                     description=request_body.get("description"),
@@ -200,6 +203,7 @@ class Operation(CachedPropertyModel):
                     required=request_body.get("required") is True,
                 )
             )
+
         return requests
 
     @cached_property
@@ -272,11 +276,7 @@ class Operation(CachedPropertyModel):
         if self.parameters:
             for parameter in self.parameters:
                 parameter_in = parameter["in"]
-                # print(parameter_in)
                 argument = self.get_parameter_type(parameter, snake_case)
-
-                if argument.name == "body":
-                    print(parameter_in, parameter)
 
                 if parameter_in == "header":
                     continue
@@ -339,6 +339,13 @@ class Operation(CachedPropertyModel):
                     Import(from_=model_module_name_var.get(), import_=data_type.type,)
                 )
             return data_type
+        
+        elif schema.allOf:
+            camelcase_path = stringcase.camelcase(self.path[1:].replace("/", "_"))
+            capitalized_suffix = suffix.capitalize()
+            name: str = f'{camelcase_path}{self.type.capitalize()}{capitalized_suffix}'
+            path = ['paths', self.path, self.type, capitalized_suffix]
+            return self.openapi_model_parser.parse_all_of(name, schema, path)
 
         return self.openapi_model_parser.get_data_type(schema)
 
@@ -466,7 +473,6 @@ class Operations(BaseModel):
             if operation:
                 parameters = values.get('parameters')
                 if parameters:
-                    print(parameters)
                     operation.parameters.extend(parameters)
                 if security is not None and operation.security is None:
                     operation.security = security
