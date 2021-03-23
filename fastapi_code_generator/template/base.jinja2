@@ -15,7 +15,7 @@ from . import param_model
 T = TypeVar("T", bound=BaseModel)
 VERBS = Literal["GET", "POST", "DELETE", "PUT", "HEAD"]
 
-DOCKER_API_VERSION = "1.38"
+DOCKER_API_VERSION = "1.40"
 DOCKER_TIMEOUT_SEC = 30
 
 @overload
@@ -69,15 +69,15 @@ class AsyncDockerClient:
     def from_env(cls) -> AsyncDockerClient:
         """Create a new AsyncDockerClient."""
         host = "uds:///var/run/docker.sock"
-        endpoint = f"{host}/v{DOCKER_API_VERSION}"
-
+        
         # default timeout is 5 seconds
-        client = AsyncHTTPClient(endpoint=endpoint, timeout=DOCKER_TIMEOUT_SEC)
-        return cls(client)
+        client = AsyncHTTPClient(endpoint=host, timeout=DOCKER_TIMEOUT_SEC)
+        return cls(client, DOCKER_API_VERSION)
 
-    def __init__(self, client: AsyncHTTPClient) -> None:
+    def __init__(self, client: AsyncHTTPClient, version: str) -> None:
         """Initialize."""
         self.client = client
+        self.version = version
 
     @overload
     async def request(
@@ -132,6 +132,7 @@ class AsyncDockerClient:
         **kwargs: Any,
     ) -> Union[None, str, T, List[T]]:
         """Perform request and return json response."""
+        path = f"/v{DOCKER_API_VERSION}{path}"
         res = await self.client.request(verb, path, *args, **kwargs)
         if res.status_code != 200:
             data = model.ErrorResponse.parse_raw(res.text)
