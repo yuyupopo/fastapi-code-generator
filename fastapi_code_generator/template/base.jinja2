@@ -143,6 +143,10 @@ class AsyncDockerClient:
             return res.text
         return parse_obj_as(model_t, res.json())  # type: ignore
 
+    async def close(self) -> None:
+        """Close client."""
+        await self.client.aclose()
+
 {% for operation in operations %}
     async def {{operation.function_name}}(self, {{operation.snake_case_arguments}}) -> {{operation.response}}:
         {%- if operation.summary %}
